@@ -1,0 +1,81 @@
+# SUSE's openQA tests
+#
+# Copyright 2024-2025 SUSE LLC
+# SPDX-License-Identifier: FSFAP
+
+# Package: skopeo
+# Summary: Upstream skopeo integration tests
+# Maintainer: QE-C team <qa-c@suse.de>
+
+use Mojo::Base 'containers::basetest';
+use testapi;
+use serial_terminal qw(select_serial_terminal);
+use utils qw(script_retry);
+use containers::common;
+use Utils::Architectures qw(is_x86_64);
+use containers::bats;
+use version_utils qw(is_sle);
+
+my $test_dir = "/var/tmp/skopeo-tests";
+
+sub run_tests {
+    my %params = @_;
+    my ($rootless, $skip_tests) = ($params{rootless}, $params{skip_tests});
+
+    return if ($skip_tests eq "all");
+
+    # Default quay.io/libpod/registry:2 image used by the test only has amd64 image
+    my $registry = is_x86_64 ? "" : "docker.io/library/registry:2";
+
+    my %env = (
+        SKOPEO_BINARY => "/usr/bin/skopeo",
+        SKOPEO_TEST_REGISTRY_FQIN => $registry,
+    );
+
+    my $log_file = "skopeo-" . ($rootless ? "user" : "root") . ".tap";
+
+    return bats_tests($log_file, \%env, $skip_tests);
+}
+
+sub run {
+    my ($self) = @_;
+    select_serial_terminal;
+
+    my @pkgs = qw(apache2-utils jq openssl podman squashfs skopeo);
+    push @pkgs, "fakeroot" unless is_sle('>=16.0');
+
+    $self->bats_setup(@pkgs);
+
+    record_info("skopeo version", script_output("skopeo --version"));
+    record_info("skopeo package version", script_output("rpm -q skopeo"));
+
+    # Download skopeo sources
+    my $skopeo_version = script_output "skopeo --version  | awk '{ print \$3 }'";
+    my $url = get_var("BATS_URL", "https://github.com/containers/skopeo/archive/refs/tags/v$skopeo_version.tar.gz");
+    assert_script_run "mkdir -p $test_dir";
+    assert_script_run "cd $test_dir";
+    script_retry("curl -sL $url | tar -zxf - --strip-components 1", retry => 5, delay => 60, timeout => 300);
+
+    # Upstream script gets GOARCH by calling `go env GOARCH`.  Drop go dependency for this only use of go
+    my $goarch = script_output "podman version -f '{{.OsArch}}' | cut -d/ -f2";
+    assert_script_run "sed -i 's/arch=.*/arch=$goarch/' systemtest/010-inspect.bats";
+
+    my $errors = run_tests(rootless => 1, skip_tests => get_var('BATS_SKIP_USER', ''));
+
+    select_serial_terminal;
+    assert_script_run "cd $test_dir";
+
+    $errors += run_tests(rootless => 0, skip_tests => get_var('BATS_SKIP_ROOT', ''));
+
+    die "skopeo tests failed" if ($errors);
+}
+
+sub post_fail_hook {
+    bats_post_hook $test_dir;
+}
+
+sub post_run_hook {
+    bats_post_hook $test_dir;
+}
+
+1;

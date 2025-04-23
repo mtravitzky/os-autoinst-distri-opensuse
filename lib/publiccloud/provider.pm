@@ -233,7 +233,12 @@ sub run_img_proof {
     my $cmd = 'img-proof --no-color test ' . $args{provider};
     $cmd .= ' --debug ';
     $cmd .= "--distro " . $args{distro} . " ";
-    $cmd .= '--region "' . $self->provider_client->region . '" ';
+    if (is_gce()) {
+        $cmd .= '--region "' . $self->provider_client->region . '-' . $self->provider_client->availability_zone . '" ';
+    }
+    else {
+        $cmd .= '--region "' . $self->provider_client->region . '" ';
+    }
     $cmd .= '--results-dir "' . $args{results_dir} . '" ';
     $cmd .= '--no-cleanup ';
     $cmd .= '--collect-vm-info ';
@@ -519,6 +524,7 @@ sub terraform_apply {
         } elsif (is_gce) {
             my $stack_type = get_var('PUBLIC_CLOUD_GCE_STACK_TYPE', 'IPV4_ONLY');
             $vars{stack_type} = $stack_type;
+            $vars{availability_zone} = $self->provider_client->availability_zone;
         }
         $vars{instance_count} = $args{count};
         $vars{type} = $instance_type;
@@ -573,9 +579,14 @@ sub terraform_apply {
         my @alternative_zones = split /\s*,\s*/, $1;
         record_info('ZONE UNAVAILABLE', "Alternative zones " . join(', ', @alternative_zones));
         for my $zone (@alternative_zones) {
+            # Extract region and availability zone from the full zone name
+            my ($alt_region, $alt_availability_zone) = ($zone =~ /^([a-z0-9-]+)-([a-z])$/);
+
             # try to apply in all regions before hardfailing
-            record_info('RETRYING', "Attempting with zone $zone");
-            $vars{region} = $zone;
+            record_info('RETRYING', "Attempting with zone $zone (region: $alt_region, availability_zone: $alt_availability_zone)");
+            $vars{region} = $alt_region;
+            $vars{availability_zone} = $alt_availability_zone;
+
             $cmd = terraform_cmd('terraform plan -no-color -out myplan', %vars);
             script_retry($cmd, timeout => $terraform_timeout, delay => 3, retry => 6);
             $ret = script_run("set -o pipefail; TF_LOG=$tf_log terraform apply -no-color -input=false myplan 2>&1 | tee tf_apply_output", timeout => $terraform_timeout);
@@ -748,13 +759,13 @@ sub escape_single_quote {
     return $s;
 }
 
-=head2 cleanup
+=head2 teardown
 
-This method is called called after each test on failure or success.
+This method is calling the terraform_destroy() subroutine.
 
 =cut
 
-sub cleanup {
+sub teardown {
     my ($self) = @_;
     $self->terraform_destroy();
     assert_script_run "cd";

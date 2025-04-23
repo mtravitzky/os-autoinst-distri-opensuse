@@ -187,6 +187,8 @@ Wrapper for SUSEConnect -p $name.
 
 sub add_suseconnect_product {
     my ($name, $version, $arch, $params, $timeout, $retry) = @_;
+    # no SCC registration https://progress.opensuse.org/issues/131498#note-5
+    record_info('skip SCC', "Skip activating product on flavor without SCC registration") && return if ((get_var('FLAVOR') =~ /TERADATA/) && is_sle('=15-SP4'));
     assert_script_run 'source /etc/os-release';
     $version //= '${VERSION_ID}';
     $arch //= '${CPU}';
@@ -202,7 +204,7 @@ sub add_suseconnect_product {
     my $try_cnt = 0;
     while ($try_cnt++ <= $retry) {
         if (is_transactional) {
-            eval { trup_call("register -p $name/" . get_var('VERSION') . '/' . get_var('ARCH')) };
+            eval { trup_call("register -p $name/" . $version . '/' . get_var('ARCH')) };
         } else {
             eval { assert_script_run("SUSEConnect $debug_flag -p $name/$version/$arch $params", timeout => $timeout); };
         }
@@ -865,6 +867,7 @@ sub get_addon_fullname {
         nvidia => 'sle-module-NVIDIA-compute',
         idu => is_sle('15+') ? 'IBM-POWER-Tools' : 'IBM-DLPAR-utils',
         ids => is_sle('15+') ? 'IBM-POWER-Adv-Toolchain' : 'IBM-DLPAR-SDK',
+        sysm => 'sle-module-systems-management',
     );
     return $product_list{"$addon"};
 }
@@ -928,6 +931,11 @@ sub scc_deregistration {
         quit_packagekit;
         wait_for_purge_kernels;
         assert_script_run('SUSEConnect --version');
+        # Remove registercloudguest when use suseconnect in a non public cloud environment.
+        if (get_var('SCC_ADDONS', '') =~ /pcm/) {
+            my $cloudguest_bin = "/usr/sbin/registercloudguest";
+            assert_script_run "test -f $cloudguest_bin && rm -f $cloudguest_bin";
+        }
         # We don't need to pass $debug_flag to SUSEConnect, because it's already set
         my $deregister_ret = script_run("SUSEConnect --de-register --debug > /tmp/SUSEConnect.debug 2>&1", 300);
         if ($deregister_ret) {
@@ -1080,7 +1088,7 @@ sub runtime_registration {
         trup_call('--continue run zypper --gpg-auto-import-keys refresh') if is_staging;
         if (is_sle_micro('>=6.0') && is_sle_micro('<=6.1')) {
             process_reboot(trigger => 1);
-            add_suseconnect_product('SL-Micro-Extras');
+            add_suseconnect_product('SL-Micro-Extras', get_var('HDDVERSION'), undef, undef, 90, 1);
         }
         process_reboot(trigger => 1);
     }

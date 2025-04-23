@@ -27,6 +27,7 @@ AUTOYAST_PREPARE_PROFILE | boolean | false | Enable variable expansion in the au
 AUTOYAST_VERIFY_TIMEOUT  | boolean | false | Enable validation of pop-up windows timeout.
 AY_EXPAND_VARS | string | | Commas separated list of variable names to be expanded in the provided autoyast profile. For example: REPO_SLE_MODULE_BASESYSTEM,DESKTOP,... Provided variables will replace `{{VAR}}` in the profile with the value of given variable. See also `AUTOYAST_PREPARE_PROFILE`.
 BASE_VERSION | string | | |
+BATS_* | string | | Used for [BATS tests](https://github.com/os-autoinst/os-autoinst-distri-opensuse/blob/master/tests/containers/bats/README.md) |
 BETA | boolean | false | Enables checks and processing of beta warnings. Defines current stage of the product under test.
 BCI_DEVEL_REPO | string | | This parameter is given to the bci-tests to inject a different SLE_BCI repository url to the container image instead of the default one. Used by `bci_test.pm`.
 BCI_TEST_ENVS | string | | The list of environments to be tested, e.g. `base,init,dotnet,python,node,go,multistage`. Used by `bci_test.pm`. Use `-` to not schedule any BCI test runs.
@@ -312,12 +313,14 @@ PUBLIC_CLOUD_ACCNET | boolean | false | If set, az_accelerated_net test module i
 PUBLIC_CLOUD_ACCOUNT | string | "" | For GCE will set account via `gcloud config set account ' . $self->account`.
 PUBLIC_CLOUD_AHB_LT | string | "SLES_BYOS" | For Azure, it specifies the license type to change to (and test).
 PUBLIC_CLOUD_ARCH | string | "x86_64" | The architecture of created VM.
+PUBLIC_CLOUD_AVAILABILITY_ZONE | string | "" | The availability zone to use. Depends on `PUBLIC_CLOUD_REGION`. Only for GCE.
 PUBLIC_CLOUD_AZURE_IMAGE_DEFINITION | string | "" | Defines the image definition for uploading Arm64 images to the image gallery.
 PUBLIC_CLOUD_AZURE_K8S_RESOURCE_GROUP | string | "" | Name for the resource group which is subscribed the kubernetes cluster.
 PUBLIC_CLOUD_AZURE_OFFER | string | "" | Specific to Azure. Allow to query for image based on offer and sku. Should be used together with PUBLIC_CLOUD_AZURE_SKU.
 PUBLIC_CLOUD_AZURE_PUBLISHER | string | "SUSE" | Specific to Azure. Allows to define the used publisher, if it should not be "SUSE"
 PUBLIC_CLOUD_AZURE_SKU | string | "" | Specific to Azure.
 PUBLIC_CLOUD_AZURE_SUBSCRIPTION_ID | string | "" | Used to create the service account file together with `PUBLIC_CLOUD_AZURE_TENANT_ID`.
+PUBLIC_CLOUD_AZURE_AITL_VER | string | undef | Define version of Azure Image Testing for Linux (AITL) used in testing
 PUBLIC_CLOUD_AZ_API | string | "http://169.254.169.254/metadata/instance/compute" | For Azure, it is the metadata API endpoint.
 PUBLIC_CLOUD_AZ_API_VERSION | string | "2021-02-01" | For Azure, it is the API version used whe querying metadata API.
 PUBLIC_CLOUD_BUILD | string | "" | The image build number. Used only when we use custom built image.
@@ -365,7 +368,7 @@ PUBLIC_CLOUD_LTP | boolean | false | If set, the run_ltp test module is added to
 PUBLIC_CLOUD_MAX_INSTANCES | integer | 1 | Allows the test to call "create_instance" subroutine within lib/publiccloud/provider.md a limited amount of times. If set to 0 or undef, it allows an unlimited amount of calls.
 PUBLIC_CLOUD_NAMESPACE | string | "" | The Public Cloud Namespace name that will be used to compose the full credentials URL together with `PUBLIC_CLOUD_CREDENTIALS_URL`.
 PUBLIC_CLOUD_NEW_INSTANCE_TYPE | string | "t3a.large" | Specify the new instance type to check bsc#1205002 in EC2
-PUBLIC_CLOUD_NO_CLEANUP | boolean | false | Do not remove the instance after test finished running.
+PUBLIC_CLOUD_NO_TEARDOWN | boolean | false | Do not tear the instance down.
 PUBLIC_CLOUD_NVIDIA | boolean | 0 | If enabled, nvidia module would be scheduled. This variable should be enabled only sle15SP4 and above.
 PUBLIC_CLOUD_PERF_COLLECT | boolean | 1 | To enable `boottime` measures collection, at end of `create_instance` routine.
 PUBLIC_CLOUD_PERF_DB | string | "perf_2" | defines the bucket in which the performance metrics are stored on PUBLIC_CLOUD_PERF_DB_URI

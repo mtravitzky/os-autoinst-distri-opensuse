@@ -29,11 +29,8 @@ use containers::common qw(install_packages);
 our @EXPORT = qw(
   bats_post_hook
   bats_setup
-  enable_modules
-  install_bats
+  bats_tests
   install_ncat
-  install_oci_runtime
-  patch_logfile
   selinux_hack
   switch_to_user
 );
@@ -64,7 +61,7 @@ sub install_ncat {
 }
 
 sub install_bats {
-    return if (script_run("which bats") == 0);
+    return if (script_run("command -v bats") == 0);
 
     my $bats_version = get_var("BATS_VERSION", "1.11.1");
 
@@ -80,13 +77,17 @@ sub install_bats {
     assert_script_run "chmod +x /usr/local/bin/bats_skip_notok";
 }
 
-sub install_oci_runtime {
-    my $oci_runtime = get_var("OCI_RUNTIME", script_output("podman info --format '{{ .Host.OCIRuntime.Name }}'"));
-    install_packages($oci_runtime);
-    script_run "mkdir /etc/containers/containers.conf.d";
+sub configure_oci_runtime {
+    my $oci_runtime = shift;
+
+    return if (script_run("command -v podman") != 0);
+
+    if (!$oci_runtime) {
+        $oci_runtime = script_output("podman info --format '{{ .Host.OCIRuntime.Name }}'");
+    }
+    assert_script_run "mkdir -p /etc/containers/containers.conf.d";
     assert_script_run "echo -e '[engine]\nruntime=\"$oci_runtime\"' >> /etc/containers/containers.conf.d/engine.conf";
     record_info("OCI runtime", $oci_runtime);
-    return $oci_runtime;
 }
 
 sub get_user_subuid {
@@ -169,10 +170,33 @@ EOF
 }
 
 sub bats_setup {
-    my $self = shift;
+    my ($self, @pkgs) = @_;
     my $reboot_needed = 0;
 
+    install_bats;
+
+    enable_modules if is_sle;
+
+    # Install tests dependencies
+    my $oci_runtime = get_var("OCI_RUNTIME", "");
+    if ($oci_runtime && !grep { $_ eq $oci_runtime } @pkgs) {
+        push @pkgs, $oci_runtime;
+    }
+    install_packages(@pkgs);
+
+    configure_oci_runtime $oci_runtime;
+
     delegate_controllers;
+
+    if (check_var("ENABLE_SELINUX", "0") && script_output("getenforce") eq "Enforcing") {
+        record_info("Disabling SELinux");
+        assert_script_run "sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config";
+        assert_script_run "setenforce 0";
+    } else {
+        # Rebuild SELinux policies without the so-called "dontaudit" rules
+        # https://en.opensuse.org/Portal:SELinux/Troubleshooting
+        script_run "semodule -DB || true";
+    }
 
     # Remove mounts.conf
     script_run "rm -vf /etc/containers/mounts.conf /usr/share/containers/mounts.conf";
@@ -235,5 +259,61 @@ sub bats_post_hook {
         upload_logs($log_dir . $log);
     }
 
+    upload_logs('/proc/config.gz');
     upload_logs('/var/log/audit/audit.log', log_name => "audit.txt");
+}
+
+sub bats_tests {
+    my ($log_file, $_env, $skip_tests) = @_;
+    my %env = %{$_env};
+
+    my $package = get_required_var("BATS_PACKAGE");
+
+    my $tmp_dir = script_output "mktemp -d -p /var/tmp test.XXXXXX";
+    selinux_hack $tmp_dir if ($package =~ /buildah|podman/);
+
+    $env{BATS_TMPDIR} = $tmp_dir;
+    $env{TMPDIR} = $tmp_dir if ($package eq "buildah");
+    $env{PATH} = '/usr/local/bin:$PATH:/usr/sbin:/sbin';
+    my $env = join " ", map { "$_=$env{$_}" } sort keys %env;
+
+    # Subdirectory in repo containing BATS tests
+    my %tests_dir = (
+        aardvark => "test",
+        buildah => "tests",
+        netavark => "test",
+        podman => "test/system",
+        runc => "tests/integration",
+        skopeo => "systemtest",
+    );
+
+    my @tests;
+    foreach my $test (split(/\s+/, get_var("BATS_TESTS", ""))) {
+        $test .= ".bats" unless $test =~ /\.bats$/;
+        push @tests, "$tests_dir{$package}/$test";
+    }
+    my $tests = @tests ? join(" ", @tests) : $tests_dir{$package};
+
+    my $cmd = "bats --tap $tests";
+    # With podman we must use its own hack/bats instead of calling bats directly
+    if ($package eq "podman") {
+        my $args = ($log_file =~ /root/) ? "--root" : "--rootless";
+        $args .= " --remote" if ($log_file =~ /remote/);
+        $cmd = "hack/bats $args";
+        $cmd .= " $tests" if ($tests ne $tests_dir{podman});
+    }
+
+    assert_script_run "echo $log_file .. > $log_file";
+    my $ret = script_run "env $env $cmd | tee -a $log_file", 7000;
+
+    unless (@tests) {
+        my @skip_tests = split(/\s+/, get_var('BATS_SKIP', '') . " " . $skip_tests);
+        patch_logfile($log_file, @skip_tests);
+    }
+
+    parse_extra_log(TAP => $log_file);
+
+    script_run "rm -rf $tmp_dir";
+
+    return ($ret);
 }
