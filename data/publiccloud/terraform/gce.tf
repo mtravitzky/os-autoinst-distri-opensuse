@@ -144,8 +144,12 @@ resource "google_compute_instance" "openqa" {
     }
   }
 
-  scheduling {
-    on_host_maintenance = "TERMINATE"
+  # some instance types requires this parameter others fails with it so we need to use it based on instance type
+  dynamic "scheduling" {
+    for_each = contains(["c3-highcpu-192-metal"], var.type) ? [1] : []
+    content {
+      on_host_maintenance = "TERMINATE"
+    }
   }
 
   metadata = merge({

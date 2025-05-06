@@ -10,13 +10,10 @@
 use Mojo::Base 'containers::basetest';
 use testapi;
 use serial_terminal qw(select_serial_terminal);
-use utils qw(script_retry);
-use containers::common;
 use Utils::Architectures qw(is_x86_64);
 use containers::bats;
 use version_utils qw(is_sle);
 
-my $test_dir = "/var/tmp/skopeo-tests";
 
 sub run_tests {
     my %params = @_;
@@ -51,19 +48,16 @@ sub run {
 
     # Download skopeo sources
     my $skopeo_version = script_output "skopeo --version  | awk '{ print \$3 }'";
-    my $url = get_var("BATS_URL", "https://github.com/containers/skopeo/archive/refs/tags/v$skopeo_version.tar.gz");
-    assert_script_run "mkdir -p $test_dir";
-    assert_script_run "cd $test_dir";
-    script_retry("curl -sL $url | tar -zxf - --strip-components 1", retry => 5, delay => 60, timeout => 300);
+    bats_sources $skopeo_version;
+    bats_patches;
 
     # Upstream script gets GOARCH by calling `go env GOARCH`.  Drop go dependency for this only use of go
     my $goarch = script_output "podman version -f '{{.OsArch}}' | cut -d/ -f2";
-    assert_script_run "sed -i 's/arch=.*/arch=$goarch/' systemtest/010-inspect.bats";
+    run_command "sed -i 's/arch=.*/arch=$goarch/' systemtest/010-inspect.bats";
 
     my $errors = run_tests(rootless => 1, skip_tests => get_var('BATS_SKIP_USER', ''));
 
-    select_serial_terminal;
-    assert_script_run "cd $test_dir";
+    switch_to_root;
 
     $errors += run_tests(rootless => 0, skip_tests => get_var('BATS_SKIP_ROOT', ''));
 
@@ -71,11 +65,11 @@ sub run {
 }
 
 sub post_fail_hook {
-    bats_post_hook $test_dir;
+    bats_post_hook;
 }
 
 sub post_run_hook {
-    bats_post_hook $test_dir;
+    bats_post_hook;
 }
 
 1;

@@ -345,7 +345,7 @@ sub run {
                 # Patch binaries already installed.
                 record_info 'Conflict install', "Install patch $patch with conflicting $single_package";
                 if ($solver_focus) {
-                    zypper_call("in -l -t patch $patch", exitcode => [0, 102, 103], log => "zypper_$patch.log", timeout => 2000);
+                    zypper_call("in -l $solver_focus -t patch $patch", exitcode => [0, 102, 103], log => "zypper_$patch.log", timeout => 2000);
                 }
                 else {
                     sle12_zypp_resolve("zypper -v in -l -t patch $patch", get_var('UPDATE_RESOLVE_SOLUTION_CONFLICT_INSTALL', 1));
@@ -473,6 +473,13 @@ sub run {
         assert_script_run("cat /tmp/$_* > /tmp/$_.log");
         upload_logs("/tmp/$_.log");
     }
+}
+
+sub post_fail_hook {
+    my $self = shift;
+    force_soft_failure('Expected to fail') if get_var('BUILD') =~ /update-test-trivial/;
+    return if get_var('BUILD') =~ /update-test-trivial/;
+    $self->SUPER::post_fail_hook;
 }
 
 sub test_flags {

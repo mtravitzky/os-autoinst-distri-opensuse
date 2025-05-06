@@ -27,7 +27,7 @@ sub run {
     load_os_env_variables();
     my $instance_id_scs = get_sdaf_instance_id(pattern => 'SCS');
     my $instance_id_ers = get_sdaf_instance_id(pattern => 'ERS');
-    # Disonnect from deployer VM
+    # Disconnect from deployer VM
     disconnect_target_from_serial();
 
     # Get scs instance data
@@ -53,7 +53,7 @@ sub run {
     # Execute ASCS failover from ASCS to ERS
     record_info('Failover', "Executing 'HAFailoverToNode'. Failover from $instance_hostname_scs to $instance_hostname_ers");
     execute_failover(instance_id => $instance_id_scs, instance_user => $user_scs, instance_type => 'ASCS', wait_for_target => $instance_hostname_ers);
-    # Disonnect from scs VM
+    # Disconnect from scs VM
     disconnect_target_from_serial();
 
     # Execute ASCS failover: repeat whole failover and return ASCS to original node
@@ -61,7 +61,7 @@ sub run {
     connect_target_to_serial(destination_ip => $ip_ers, ssh_user => $user_ers, switch_root => 1);
     record_info('Failover', "Executing 'HAFailoverToNode'. Failover from $instance_hostname_ers to $instance_hostname_scs");
     execute_failover(instance_id => $instance_id_scs, instance_user => $user_scs, instance_type => 'ASCS', wait_for_target => $instance_hostname_scs);
-    # Disonnect from ers VM
+    # Disconnect from ers VM
     disconnect_target_from_serial();
 
     # Final check

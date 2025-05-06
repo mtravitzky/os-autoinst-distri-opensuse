@@ -11,7 +11,7 @@ use base Exporter;
 use Exporter;
 use strict;
 use warnings;
-use version_utils qw(is_sle);
+use version_utils qw(is_sle package_version_cmp);
 use Scalar::Util qw(looks_like_number);
 use utils;
 use testapi;
@@ -52,6 +52,7 @@ our @EXPORT = qw(
   ensure_process_running
   ensure_resource_running
   ensure_dlm_running
+  execute_crm_resource_refresh_and_check
   write_tag
   read_tag
   block_device_real_path
@@ -85,6 +86,11 @@ our @EXPORT = qw(
   generate_lun_list
   show_cluster_parameter
   set_cluster_parameter
+  prepare_console_for_fencing
+  crm_get_failcount
+  crm_wait_failcount
+  crm_resources_by_class
+  crm_resource_locate
 );
 
 =head1 SYNOPSIS
@@ -120,7 +126,7 @@ Extension (HA or HAE) tests.
 
 =cut
 
-our $crm_mon_cmd = 'crm_mon -R -r -n -N -1';
+our $crm_mon_cmd = 'crm_mon -R -r -n -1';
 our $softdog_timeout = bmwqemu::scale_timeout(60);
 our $prev_console;
 our $join_timeout = bmwqemu::scale_timeout(60);
@@ -499,6 +505,44 @@ sub ensure_dlm_running {
     return ensure_process_running 'dlm_controld';
 }
 
+=head2 execute_crm_resource_refresh_and_check
+
+ execute_crm_resource_refresh_and_check();
+
+Execute C<crm resource refresh> for specified C<resource> on C<instance_hostname>
+and check the C<crm_failcount> returns C<value=0>.
+Check no B<failover> happens and state of cluster resources is healthy.
+
+=cut
+
+sub execute_crm_resource_refresh_and_check {
+    my (%args) = @_;
+    my $instance_type = $args{instance_type};
+    my $instance_id = $args{instance_id};
+    my $instance_hostname = $args{instance_hostname};
+    my $instance_sid = get_required_var('SAP_SID');
+    my $resource = "rsc_sap_${instance_sid}_$instance_type$instance_id";
+
+    # Delete resource's recorded failures before refresh
+    record_info("Delete failcount", "delete sapinstance recorded failures of $resource");
+    assert_script_run("sudo crm_failcount --delete -r $resource -N $instance_hostname");
+    # Refresh resource
+    record_info("Refresh $instance_type", "refresh sapinstance $resource");
+    assert_script_run("sudo crm resource refresh $resource");
+
+    # Query the current value of the resource's fail count
+    record_info("Query $instance_type", "Query fail count of sapinstance $resource");
+    my $str = script_output("sudo crm_failcount --query -r $resource -N $instance_hostname");
+    $str =~ /value=(\d+)/;
+    die 'Test failed to crm_failcount is non-zero' if (int($1));
+    # Check cluster
+    record_info('Cluster check', 'Checking state of cluster resources is healthy');
+    check_cluster_state();
+    # Check failover
+    record_info('NoFailover check', 'Checking no failover happens');
+    crm_check_resource_location(resource => $resource, wait_for_target => $instance_hostname);
+}
+
 =head2 write_tag
 
  write_tag( $tag );
@@ -695,7 +739,7 @@ Checks the state of the cluster. Calls B<$crm_mon_cmd> and inspects its output c
 =back
 
 Checks that the reported number of nodes in the output of C<crm node list> and B<$crm_mon_cmd>
-is the same.
+is the same by calling C<check_online_nodes>.
 
 And runs C<crm_verify -LV>.
 
@@ -718,8 +762,17 @@ sub check_cluster_state {
         $cmd->("$crm_mon_cmd | grep -i 'no inactive resources'");
     }
     $cmd->('crm_mon -1 | grep \'partition with quorum\'');
-    # In older versions, node names in crm node list output are followed by ": normal". In newer ones by ": member"
-    $cmd->(q/crm_mon -s | grep "$(crm node list | grep -E -c ': member|: normal') nodes online"/);
+
+    # If running with versions of crmsh older than 4.4.2, do not use check_online_nodes (see POD below)
+    # Fall back to the older method of checking Online vs. Configured nodes
+    my $cmp_result = package_version_cmp(script_output(q|rpm -q --qf '%{VERSION}\n' crmsh|), '4.4.2');
+    if ($cmp_result < 0) {
+        $cmd->(q/crm_mon -s | grep "$(crm node list | grep -E -c ': member|: normal') nodes online"/);
+    }
+    else {
+        check_online_nodes(%args);
+    }
+
     # As some options may be deprecated, test shouldn't die on 'crm_verify'
     if (get_var('HDDVERSION')) {
         script_run 'crm_verify -LV';
@@ -727,6 +780,50 @@ sub check_cluster_state {
     else {
         $cmd->('crm_verify -LV');
     }
+}
+
+=head2 check_online_nodes
+
+ check_online_nodes( [ proceed_on_failure => 1 ] );
+
+Checks that the reported number of nodes in the output of C<crm node list> and B<$crm_mon_cmd>
+is the same.
+
+With the named argument B<proceed_on_failure> set to 1, the function will only report
+the number of nodes configured and online. Otherwise it will die when the number of
+configured nodes is different than the number of online nodes, or if it fails to get
+any of these numbers.
+
+This function is not exported and it's used only by C<check_cluster_state>.
+
+This function requires crmsh-4.4.2 or newer.
+
+=cut
+
+sub check_online_nodes {
+    my %args = @_;
+    # In older versions, node names in output from commands 'crm node list' or 'crm node show',
+    # are followed by ": normal". In newer ones by ": member"
+    my $configured_nodes = script_output q@echo "|$(crm node show | grep -E -c ': member|: normal')|"@;
+    $configured_nodes =~ /\|(\d+)\|/;
+    $configured_nodes = $1 // 0;
+    record_info 'Configured nodes', "Configured nodes: $configured_nodes";
+    die 'Cluster has 0 nodes' if ($configured_nodes == 0 && !$args{proceed_on_failure});
+
+    # Get online nodes with: crm_mon --exclude=all --include=nodes -1
+    # Output will look like:
+    # Node List:
+    #   * Online: [ node01 node02 ]
+    my $online_nodes = script_output 'crm_mon --exclude=all --include=nodes --output-as=text -1', %args;
+    foreach (split(/\n/, $online_nodes)) {
+        next unless /Online: \[\s+([^\]]+)\]/;
+        # Assign array to scalar will give us number of elements in the list
+        $online_nodes = split(/\s+/, $1);
+    }
+    record_info 'Online nodes', "Online nodes: $online_nodes";
+
+    die "Could not calculate online nodes. Got: [$online_nodes]" if (($online_nodes !~ /^\d+$/) && !$args{proceed_on_failure});
+    die 'Not all configured nodes are online' if (($configured_nodes - $online_nodes) && !$args{proceed_on_failure});
 }
 
 =head2 wait_until_resources_stopped
@@ -819,7 +916,7 @@ sub wait_until_resources_started {
 
 Use C<cs_wait_for_idle> to wait until the cluster is idle before continuing the tests.
 Supply a timeout with the named argument B<timeout> (defaults to 120 seconds). This
-timeout is scaled by the factor specified in the B<TIMEOUT_SCALE> setting. Croaks on
+timeout is scaled by the factor specified in the B<TIMEOUT_SCALE> setting. Dies on
 timeout.
 
 =cut
@@ -827,12 +924,19 @@ timeout.
 sub wait_for_idle_cluster {
     my %args = @_;
     my $timeout = bmwqemu::scale_timeout($args{timeout} // 120);
+    my $interval = 5;
     my $outoftime = time() + $timeout;    # Current time plus timeout == time at which timeout will be reached
-    return if script_run 'rpm -q ClusterTools2';    # cs_wait_for_idle only present if ClusterTools2 is installed
+    my $chk_cmd = 'cs_wait_for_idle --sleep 5';
+    if (script_run 'rpm -q ClusterTools2') {
+        # cs_wait_for_idle only present if ClusterTools2 is installed.
+        # If not installed, check with crmadmin and wait longer between checks
+        $chk_cmd = q@crmadmin -q -S $(crmadmin -Dq | sed 's/designated controller is: //i')@;
+        $interval = 30;
+    }
     while (1) {
-        my $out = script_output 'cs_wait_for_idle --sleep 5', $timeout;
-        last if ($out =~ /Cluster state: S_IDLE/);
-        sleep 5;
+        my $out = script_output $chk_cmd, $timeout, proceed_on_failure => 1;
+        last if ($out =~ /S_IDLE/);
+        sleep $interval;
         die "Cluster was not idle for $timeout seconds" if (time() >= $outoftime);
     }
 }
@@ -1516,6 +1620,145 @@ sub show_cluster_parameter {
     }
     my $cmd = join(' ', 'crm', 'resource', 'param', $args{resource}, 'show', $args{parameter});
     return script_output($cmd);
+}
+
+=head2 prepare_console_for_fencing
+
+    prepare_console_for_fencing();
+
+Some HA tests modules will cause a node to fence. In these cases, the tests will need
+to assert a B<grub2> or B<bootmenu> screen, so the modules will need to select the
+C<root-console> before any calls to C<assert_screen>. On some systems, a simple call
+to C<select_console 'root-console'> will not work as the console could be "dirty" with
+messages obscuring the root prompt. This function will pre-select the console without
+asserting anything on the screen, clear it, and then select it normally.
+
+=cut
+
+sub prepare_console_for_fencing {
+    select_console 'root-console', await_console => 0;
+    send_key 'ctrl-l';
+    send_key 'ret';
+    select_console 'root-console';
+}
+
+=head2 crm_get_failcount
+
+    crm_get_failcount(crm_resource=>'ASCS_00' [, assert_result=>'true']);
+
+Returns failcount number for specified resource.
+
+=over
+
+=item * B<crm_resource>: Cluster resource name
+
+=item * B<assert_result>: Make test fail instead of returning value. Default: 'false'
+
+=back
+
+=cut
+
+sub crm_get_failcount {
+    my (%args) = @_;
+    croak 'Missing mandatory argument "$args{crm_resource}"' unless $args{crm_resource};
+    my $cmd = join(' ', 'crm_failcount', '--query', "--resource=$args{crm_resource}");
+    my %result = map { my ($key, $value) = split(/=/, $_); $key => $value } split(/ +/, script_output($cmd));
+    die "Cluster resource '$args{crm_resource}' has positive fail count value: '$result{value}'"
+      if $result{value} != '0' && $args{assert_result};
+
+    return $result{value};
+}
+
+=head2 crm_wait_failcount
+
+    crm_wait_failcount(crm_resource=>'ASCS_00' [, timeout=>'60', delay=>'3']);
+
+Waits till crm fail count reached non-zero value of fail after B<timeout>
+
+=over
+
+=item * B<crm_resource>: Cluster resource name
+
+=item * B<timeout>: Give up after timeout in sec. Default 60 sec.
+
+=item * B<delay>: Delay between retries. Default: 5 sec
+
+=back
+
+=cut
+
+sub crm_wait_failcount {
+    my (%args) = @_;
+    $args{timeout} //= 60;
+    $args{delay} //= 5;
+
+    croak 'Missing mandatory argument "$args{crm_resource}"' unless $args{crm_resource};
+
+    my $result = 0;
+    my $start_time = time;
+    while ($result == 0) {
+        $result = crm_get_failcount(crm_resource => $args{crm_resource});
+        sleep $args{delay};
+        last if (time() > ($start_time + $args{timeout}));
+    }
+
+    die "Fail count is still 0 after timeout: '$args{timeout}'" if $result == 0;
+    return ($result);
+}
+
+
+=head2 crm_resources_by_class
+
+    crm_resources_by_class(primitive_class=>'stonith:external/sbd');
+
+Returns resource name ARRAYREF filtered by class.
+Refer to CRM help pages for details: C<crm configure show --help> and C<crm ra classes>
+
+=over
+
+=item * B<primitive_class>: CRM resource class name. Example: 'stonith:external/sbd', 'IPaddr2'
+
+=back
+
+=cut
+
+sub crm_resources_by_class {
+    my (%args) = @_;
+    croak 'Missing mandatory argument: "$args{primitive_class}"' unless $args{primitive_class};
+    my @result;
+    # Filter only 'primitive' line
+    foreach (split("\n", script_output("crm configure show related:$args{primitive_class} | grep primitive"))) {
+        # split primitive line "primitive <name> <class>"
+        my @aux = split(/\s+/, $_);
+        if ($aux[2]) {
+            # additional check if returned resource exists for some bogus value
+            assert_script_run("crm resource status $aux[1]");
+            push @result, $aux[1];
+        }
+    }
+    return \@result;
+}
+
+=head2 crm_resource_locate
+
+    crm_resource_locate(crm_resource=>'ASCS_00');
+
+Returns hostname of cluster node where defined B<crm_resource> currently resides.
+
+=over
+
+=item * B<crm_resource>: Cluster resource name
+
+=back
+
+=cut
+
+sub crm_resource_locate {
+    my (%args) = @_;
+    croak 'Missing mandatory argument: "$args{crm_resource}"' unless $args{crm_resource};
+    # Command outputs something like: 'resource rsc_sap_QES_ASCS01 is running on: qesscs01lc14'
+    my $result = script_output("crm resource locate $args{crm_resource}");
+    return (split(':\s', $result))[1];
 }
 
 1;

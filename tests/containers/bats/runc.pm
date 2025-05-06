@@ -10,11 +10,9 @@
 use Mojo::Base 'containers::basetest';
 use testapi;
 use serial_terminal qw(select_serial_terminal);
-use utils qw(script_retry);
 use containers::bats;
 use version_utils qw(is_tumbleweed);
 
-my $test_dir = "/var/tmp/runc-tests";
 
 sub run_tests {
     my %params = @_;
@@ -36,7 +34,7 @@ sub run {
     my ($self) = @_;
     select_serial_terminal;
 
-    my @pkgs = qw(git-core glibc-devel-static go jq libseccomp-devel make runc);
+    my @pkgs = qw(git-core glibc-devel-static go1.24 jq libseccomp-devel make runc);
     push @pkgs, "criu" if is_tumbleweed;
 
     $self->bats_setup(@pkgs);
@@ -49,19 +47,16 @@ sub run {
 
     # Download runc sources
     my $runc_version = script_output "runc --version  | awk '{ print \$3 }'";
-    my $url = get_var("BATS_URL", "https://github.com/opencontainers/runc/archive/refs/tags/v$runc_version.tar.gz");
-    assert_script_run "mkdir -p $test_dir";
-    assert_script_run "cd $test_dir";
-    script_retry("curl -sL $url | tar -zxf - --strip-components 1", retry => 5, delay => 60, timeout => 300);
+    bats_sources $runc_version;
+    bats_patches;
 
     # Compile helpers used by the tests
     my $cmds = script_output "find contrib/cmd tests/cmd -mindepth 1 -maxdepth 1 -type d -printf '%f ' || true";
-    script_run "make $cmds";
+    run_command "make $cmds || true";
 
     my $errors = run_tests(rootless => 1, skip_tests => get_var('BATS_SKIP_USER', ''));
 
-    select_serial_terminal;
-    assert_script_run "cd $test_dir";
+    switch_to_root;
 
     $errors += run_tests(rootless => 0, skip_tests => get_var('BATS_SKIP_ROOT', ''));
 
@@ -69,11 +64,11 @@ sub run {
 }
 
 sub post_fail_hook {
-    bats_post_hook $test_dir;
+    bats_post_hook;
 }
 
 sub post_run_hook {
-    bats_post_hook $test_dir;
+    bats_post_hook;
 }
 
 1;

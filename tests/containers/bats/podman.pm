@@ -10,13 +10,10 @@
 use Mojo::Base 'containers::basetest';
 use testapi;
 use serial_terminal qw(select_serial_terminal);
-use utils qw(script_retry);
 use version_utils qw(is_tumbleweed);
-use containers::common;
 use Utils::Architectures qw(is_x86_64 is_aarch64);
 use containers::bats;
 
-my $test_dir = "/var/tmp/podman-tests";
 my $oci_runtime = "";
 
 sub run_tests {
@@ -28,20 +25,21 @@ sub run_tests {
     my $quadlet = script_output "rpm -ql podman | grep podman/quadlet";
 
     my %env = (
+        PODMAN_ROOTLESS_USER => $testapi::username,
         PODMAN => "/usr/bin/podman",
         QUADLET => $quadlet,
     );
 
     my $log_file = "bats-" . ($rootless ? "user" : "root") . "-" . ($remote ? "remote" : "local") . ".tap";
 
-    background_script_run "podman system service --timeout=0" if ($remote);
+    run_command "podman system service --timeout=0 &" if ($remote);
 
     my $ret = bats_tests($log_file, \%env, $skip_tests);
 
-    script_run 'kill %1; kill -9 %1' if ($remote);
+    run_command 'kill %1; kill -9 %1 || true' if ($remote);
 
-    script_run 'podman rm -vf $(podman ps -aq --external)';
-    assert_script_run "podman system reset -f";
+    run_command 'podman rm -vf $(podman ps -aq --external) || true';
+    run_command "podman system reset -f";
 
     return ($ret);
 }
@@ -50,8 +48,8 @@ sub run {
     my ($self) = @_;
     select_serial_terminal;
 
-    my @pkgs = qw(aardvark-dns apache2-utils buildah catatonit git-core glibc-devel-static go gpg2 jq libcriu2 libgpgme-devel
-      libseccomp-devel make netavark openssl podman podman-remote python3-PyYAML skopeo socat sudo systemd-container);
+    my @pkgs = qw(aardvark-dns apache2-utils buildah catatonit git-core glibc-devel-static go1.24 gpg2 jq libcriu2 libgpgme-devel
+      libseccomp-devel make netavark openssl podman podman-remote python3-PyYAML skopeo socat sudo systemd-container xfsprogs);
     push @pkgs, qw(criu) if is_tumbleweed;
     # Needed for podman machine
     if (is_x86_64) {
@@ -62,10 +60,9 @@ sub run {
 
     $self->bats_setup(@pkgs);
 
-    install_ncat;
-
-    assert_script_run "podman system reset -f";
-    assert_script_run "modprobe ip6_tables";
+    run_command "podman system reset -f";
+    run_command "modprobe ip6_tables";
+    run_command "modprobe null_blk nr_devices=1 || true";
 
     record_info("podman version", script_output("podman version"));
     record_info("podman info", script_output("podman info"));
@@ -77,22 +74,19 @@ sub run {
 
     # Download podman sources
     my $podman_version = script_output "podman --version | awk '{ print \$3 }'";
-    my $url = get_var("BATS_URL", "https://github.com/containers/podman/archive/refs/tags/v$podman_version.tar.gz");
-    assert_script_run "mkdir -p $test_dir";
-    assert_script_run "cd $test_dir";
-    script_retry("curl -sL $url | tar -zxf - --strip-components 1", retry => 5, delay => 60, timeout => 300);
+    bats_sources $podman_version;
+    bats_patches;
 
     $oci_runtime = get_var("OCI_RUNTIME", script_output("podman info --format '{{ .Host.OCIRuntime.Name }}'"));
 
     # Patch tests
-    assert_script_run "sed -i 's/bats_opts=()/bats_opts=(--tap)/' hack/bats";
-    assert_script_run "sed -i 's/^PODMAN_RUNTIME=/&$oci_runtime/' test/system/helpers.bash";
-    assert_script_run "rm -f contrib/systemd/system/podman-kube@.service.in";
+    run_command "sed -i 's/^PODMAN_RUNTIME=/&$oci_runtime/' test/system/helpers.bash";
+    run_command "rm -f contrib/systemd/system/podman-kube@.service.in";
     # This test is flaky and will fail if system is "full"
-    assert_script_run "rm -f test/system/320-system-df.bats";
+    run_command "rm -f test/system/320-system-df.bats";
 
     # Compile helpers used by the tests
-    script_run "make podman-testing", timeout => 600;
+    run_command "make podman-testing || true", timeout => 600;
 
     # user / local
     my $errors = run_tests(rootless => 1, remote => 0, skip_tests => get_var('BATS_SKIP_USER_LOCAL', ''));
@@ -100,8 +94,7 @@ sub run {
     # user / remote
     $errors += run_tests(rootless => 1, remote => 1, skip_tests => get_var('BATS_SKIP_USER_REMOTE', ''));
 
-    select_serial_terminal;
-    assert_script_run "cd $test_dir";
+    switch_to_root;
 
     # root / local
     $errors += run_tests(rootless => 0, remote => 0, skip_tests => get_var('BATS_SKIP_ROOT_LOCAL', ''));
@@ -113,11 +106,11 @@ sub run {
 }
 
 sub post_fail_hook {
-    bats_post_hook $test_dir;
+    bats_post_hook;
 }
 
 sub post_run_hook {
-    bats_post_hook $test_dir;
+    bats_post_hook;
 }
 
 1;

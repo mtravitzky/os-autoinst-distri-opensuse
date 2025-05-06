@@ -7,6 +7,7 @@ use Test::Mock::Time;
 use hacluster;
 use testapi;
 use Scalar::Util qw(looks_like_number);
+use List::Util qw(all any none);
 
 my %sbd_delay_params = (
     'sbd_delay_start' => 'yes',
@@ -256,7 +257,6 @@ subtest '[set_cluster_parameter]' => sub {
     ok((grep /RoomOfRequirement open/, @calls), 'Specify parameter name');
 };
 
-
 subtest '[show_cluster_parameter]' => sub {
     my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
     my @calls;
@@ -268,6 +268,337 @@ subtest '[show_cluster_parameter]' => sub {
     ok((grep /resource param Hogwarts/, @calls), 'Call "resource" option');
     ok((grep /show/, @calls), 'Specify "show" action');
     ok((grep /RoomOfRequirement/, @calls), 'Specify parameter name');
+};
+
+subtest '[execute_crm_resource_refresh_and_check]' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    $hacluster->redefine(record_info => sub { return; });
+    $hacluster->redefine(check_cluster_state => sub { return; });
+    $hacluster->redefine(crm_check_resource_location => sub { return; });
+    $hacluster->redefine(assert_script_run => sub { return; });
+    $hacluster->redefine(script_output => sub { return 'Output value=0'; });
+
+    set_var('SAP_SID', 'QES');
+    execute_crm_resource_refresh_and_check(instance_type => 'type', instance_id => '01', instance_hostname => 'hostname');
+    $hacluster->redefine(script_output => sub { return 'Output value=1'; });
+    dies_ok { execute_crm_resource_refresh_and_check(instance_type => 'type', instance_id => '01', instance_hostname => 'hostname') } 'Expected value';
+};
+
+subtest '[check_online_nodes]' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    # Define 3 configured nodes, and 3 online nodes
+    my @outputs = ('|3|', 'Node List:
+  * Online: [ node01 node02 node03 ]');
+    my @calls;
+    $hacluster->redefine(script_output => sub { shift @outputs; });
+    $hacluster->redefine(record_info => sub { push @calls, $_[1]; });
+
+    hacluster::check_online_nodes();
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((any { /Online nodes: 3/ } @calls), 'Correct number of online nodes');
+    ok((any { /Configured nodes: 3/ } @calls), 'Correct number of configured nodes');
+};
+
+subtest '[check_online_nodes] proceed_on_failure' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    # Define 3 configured nodes, and 2 online nodes
+    my @outputs = ('|3|', 'Node List:
+  * Online: [ node01 node02 ]');
+    my @calls;
+    $hacluster->redefine(script_output => sub { shift @outputs; });
+    $hacluster->redefine(record_info => sub { push @calls, $_[1]; });
+
+    hacluster::check_online_nodes(proceed_on_failure => 1);
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((any { /Online nodes: 2/ } @calls), 'Correct number of online nodes');
+    ok((any { /Configured nodes: 3/ } @calls), 'Correct number of configured nodes');
+};
+
+subtest '[check_online_nodes] proceed_on_failure zero nodes' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    # Define 0 configured nodes
+    my @outputs = ('|0|', 'Node List:
+  * Online: [ node01 ]');
+    my @calls;
+    $hacluster->redefine(script_output => sub { shift @outputs; });
+    $hacluster->redefine(record_info => sub { push @calls, $_[1]; });
+
+    hacluster::check_online_nodes(proceed_on_failure => 1);
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((any { /Online nodes: 1/ } @calls), 'Correct number of online nodes');
+    ok((any { /Configured nodes: 0/ } @calls), 'Correct number of configured nodes');
+};
+
+subtest '[check_online_nodes] unexpected text failok' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @outputs = ('|unexpected text|', 'Node List:
+  * Online: [ node01 node02 ]');
+    my @calls;
+    $hacluster->redefine(script_output => sub { shift @outputs; });
+    $hacluster->redefine(record_info => sub { note(join(' ', 'RECORD_INFO --> ', @_)); });
+
+    dies_ok { hacluster::check_online_nodes(); } 'Cluster has 0 nodes';
+    like($@, qr/Cluster has 0 nodes/, 'Cluster has 0 nodes');
+};
+
+subtest '[check_online_nodes] zero nodes failok' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    # Define 0 configured nodes
+    my @outputs = ('|0|', 'Node List:
+  * Online: [ node01 ]');
+    $hacluster->redefine(script_output => sub { shift @outputs; });
+    $hacluster->redefine(record_info => sub { note(join(' ', 'RECORD_INFO --> ', @_)); });
+
+    dies_ok { hacluster::check_online_nodes(); } 'Cluster has 0 nodes';
+    like($@, qr/Cluster has 0 nodes/, 'Cluster has 0 nodes');
+};
+
+subtest '[check_online_nodes] mismatched nodes failok' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    # Define 0 configured nodes
+    my @outputs = ('|3|', 'Node List:
+  * Online: [ node01 node02 ]');
+    $hacluster->redefine(script_output => sub { shift @outputs; });
+    $hacluster->redefine(record_info => sub { note(join(' ', 'RECORD_INFO --> ', @_)); });
+
+    dies_ok { hacluster::check_online_nodes(); } 'Mismatched online and configured nodes';
+    like($@, qr/Not all configured nodes are online/, 'Not all configured nodes are online');
+};
+
+subtest '[check_online_nodes] cannot calculate online nodes failok' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    # Define 0 configured nodes
+    my @outputs = ('|3|', 'Node List:');
+    $hacluster->redefine(script_output => sub { shift @outputs; });
+    $hacluster->redefine(record_info => sub { note(join(' ', 'RECORD_INFO --> ', @_)); });
+
+    dies_ok { hacluster::check_online_nodes(); } 'Failed to calculate online nodes';
+    like($@, qr/Could not calculate online nodes/, $@);
+};
+
+subtest '[check_cluster_state]' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    $hacluster->redefine(script_run => sub { push @calls, $_[0]; });
+    $hacluster->redefine(assert_script_run => sub { push @calls, $_[0]; });
+    $hacluster->redefine(check_online_nodes => sub { push @calls, 'check_online_nodes'; });
+    $hacluster->redefine(script_output => sub { return '4.4.2'; });
+
+    check_cluster_state();
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((any { /crm_mon/ } @calls), 'At least one crm_mon call found');
+    ok((any { /check_online_nodes/ } @calls), 'check_online_nodes called');
+    ok((any { /crm_verify/ } @calls), 'At least one crm_verify call found');
+};
+
+subtest '[check_cluster_state] assert calls normally' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    $hacluster->redefine(script_run => sub { push @calls, 'script_run'; });
+    $hacluster->redefine(assert_script_run => sub { push @calls, 'assert_script_run'; });
+    $hacluster->redefine(check_online_nodes => sub { return; });
+    $hacluster->redefine(script_output => sub { return '4.4.2'; });
+
+    check_cluster_state();
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((all { /assert_script_run/ } @calls), 'check_cluster_state used assert_script_run');
+};
+
+subtest '[check_cluster_state] proceed_on_failure' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    $hacluster->redefine(script_run => sub { push @calls, 'script_run'; });
+    $hacluster->redefine(assert_script_run => sub { push @calls, 'assert_script_run'; });
+    $hacluster->redefine(check_online_nodes => sub { return; });
+    $hacluster->redefine(script_output => sub { return '4.4.2'; });
+
+    check_cluster_state(proceed_on_failure => 1);
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((all { /^script_run$/ } @calls), 'check_cluster_state used script_run');
+};
+
+subtest '[check_cluster_state] migration scenario' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    $hacluster->redefine(script_run => sub { push @calls, 'script_run'; });
+    $hacluster->redefine(assert_script_run => sub { push @calls, 'assert_script_run'; });
+    $hacluster->redefine(check_online_nodes => sub { return; });
+    $hacluster->redefine(script_output => sub { return '4.4.2'; });
+    set_var('HDDVERSION', 'some version');
+
+    check_cluster_state();
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((scalar(grep { /^script_run$/ } @calls)) == 1, 'One call with script_run');
+    ok((scalar(grep { /assert_script_run/ } @calls) == (scalar(@calls) - 1)), 'Remaining calls with assert_script_run');
+    set_var('HDDVERSION', undef);
+};
+
+subtest '[check_cluster_state] old crmsh' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    $hacluster->redefine(script_run => sub { push @calls, $_[0]; });
+    $hacluster->redefine(assert_script_run => sub { push @calls, $_[0]; });
+    $hacluster->redefine(check_online_nodes => sub { push @calls, 'check_online_nodes'; });
+    $hacluster->redefine(script_output => sub { return '3.6.0'; });
+
+    check_cluster_state();
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((any { /crm_mon -s/ } @calls), 'crm_mon -s used');
+    ok((none { /check_online_nodes/ } @calls), 'check_online_nodes not called');
+};
+
+subtest '[wait_for_idle_cluster] with ClusterTools2' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    # Simulate ClusterTools2 installed
+    $hacluster->redefine(script_run => sub { push @calls, $_[0]; return 0; });
+    $hacluster->redefine(script_output => sub { push @calls, $_[0]; return 'S_IDLE'; });
+
+    wait_for_idle_cluster();
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((any { /ClusterTools2/ } @calls), 'ClusterTools2 checked');
+    ok((any { /cs_wait_for_idle/ } @calls), 'cs_wait_for_idle used');
+};
+
+subtest '[wait_for_idle_cluster] without ClusterTools2' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    # Simulate ClusterTools2 not installed
+    $hacluster->redefine(script_run => sub { push @calls, $_[0]; return 1; });
+    $hacluster->redefine(script_output => sub { push @calls, $_[0]; return 'S_IDLE'; });
+
+    wait_for_idle_cluster();
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((any { /ClusterTools2/ } @calls), 'ClusterTools2 checked');
+    ok((any { /crmadmin/ } @calls), 'crmadmin used');
+};
+
+subtest '[wait_for_idle_cluster] timeout' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    # Simulate ClusterTools2 installed
+    $hacluster->redefine(script_run => sub { return 0; });
+    $hacluster->redefine(script_output => sub { return 'S_NOT_IDLE'; });
+
+    dies_ok { wait_for_idle_cluster(); } 'Cluster not idle in 120s';
+    like($@, qr/Cluster was not idle for 120 seconds/, $@);
+
+    dies_ok { wait_for_idle_cluster(timeout => 30); } 'Cluster not idle in 30s';
+    like($@, qr/Cluster was not idle for 30 seconds/, $@);
+};
+
+subtest '[prepare_console_for_fencing]' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    $hacluster->redefine(select_console => sub { push @calls, @_; });
+    $hacluster->redefine(send_key => sub { push @calls, $_[0]; });
+
+    prepare_console_for_fencing();
+    note("\n  -->  " . join("\n  -->  ", @calls));
+
+    ok((any { /^ctrl\-l$/ } @calls), 'Ctrl-L detected');
+    ok((any { /^ret$/ } @calls), 'Return detected');
+    ok((scalar(grep { /^root-console$/ } @calls) == 2), 'root-console selected twice');
+    ok((any { /await_console/ } @calls), 'await_console argument passed');
+};
+
+subtest '[crm_get_failcount] Mandatory args' => sub {
+    dies_ok { crm_get_failcount() } 'Fail with missing mandatory arg: resource';
+};
+
+subtest '[crm_get_failcount] Command composition' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    $hacluster->redefine(script_output =>
+          sub { @calls = @_; return 'scope=status  name=fail-count-rsc_sap_QES_ASCS01 value=0'; });
+
+    crm_get_failcount(crm_resource => 'rsc_sap_QES_ASCS01');
+    note("\n  -->  " . join("\n  -->  ", @calls));
+    ok((grep /crm_failcount/, @calls), 'Execute "crm_failcount" command.');
+    ok((grep /--query/, @calls), 'Query current value using "--query"');
+    ok((grep /--resource/, @calls), 'Query value for specific resource using "--resource"');
+};
+
+subtest '[crm_get_failcount] Verify result' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    $hacluster->redefine(script_output => sub { return 'scope=status  name=fail-count-rsc_sap_QES_ASCS01 value=0'; });
+    is crm_get_failcount(crm_resource => 'rsc_sap_QES_ASCS01'), '0', 'Return fail count: 0';
+    $hacluster->redefine(script_output => sub { return 'scope=status  name=fail-count-rsc_sap_QES_ASCS01 value=1000'; });
+    is crm_get_failcount(crm_resource => 'rsc_sap_QES_ASCS01'), '1000', 'Return fail count: 1000';
+};
+
+subtest '[crm_resources_by_class] Mandatory args' => sub {
+    dies_ok { crm_resources_by_class() } 'Fail with missing argument "primitive_class"';
+};
+
+subtest '[crm_resources_by_class] Command composition' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    $hacluster->redefine(script_output => sub { @calls = @_; return 'primitive rsc_sap_QES_ASCS01 SAPInstance'; });
+    $hacluster->redefine(assert_script_run => sub { return; });
+    crm_resources_by_class(primitive_class => 'SAPInstance');
+    note("\n  -->  " . join("\n  -->  ", @calls));
+    ok((grep /crm/, @calls), 'Execute "crm" command.');
+    ok((grep /configure/, @calls), 'Execute "configure" subcommand.');
+    ok((grep /show/, @calls), 'Execute "show" option.');
+    ok((grep /related:SAPInstance/, @calls), 'Include class');
+    ok((grep /| grep primitive/, @calls), 'Show only "primitive" lines');
+};
+
+subtest '[crm_resources_by_class] Result verification' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    $hacluster->redefine(script_output => sub { return 'primitive rsc_sap_QES_ASCS01 SAPInstance
+primitive rsc_sap_QES_ERS02 SAPInstance'; });
+    $hacluster->redefine(assert_script_run => sub { return; });
+    my @resources_found = @{crm_resources_by_class(primitive_class => 'SAPInstance')};
+    ok((grep /SCS/, @resources_found), 'Result finds ASCS instance name');
+    ok((grep /ERS/, @resources_found), 'Result finds ERS instance name');
+};
+
+subtest '[crm_wait_failcount] Check exceptions' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    $hacluster->redefine(crm_get_failcount => sub { return 0; });
+
+    dies_ok { crm_wait_failcount() } "Fail with missing argument: crm_resource";
+    dies_ok { crm_wait_failcount(crm_resource => 'raspberry') } 'Fail with fail count not increasing';
+};
+
+subtest '[crm_wait_failcount]' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    $hacluster->redefine(crm_get_failcount => sub { return 1; });
+
+    ok(crm_wait_failcount(crm_resource => 'raspberry'), 'PASS with fail count increasing');
+};
+
+subtest '[crm_resource_locate] Mandatory args' => sub {
+    dies_ok { crm_resource_locate }, 'Missing mandaroty $args{crm_resource}';
+};
+
+subtest '[crm_resource_locate] Verify cmd' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    my @calls;
+    $hacluster->redefine(script_output => sub { @calls = @_; return 'someting'; });
+    crm_resource_locate(crm_resource => 'rsc_sap_QES_ASCS01');
+    note("\n  -->  " . join("\n  -->  ", @calls));
+    ok((grep /crm/, @calls), 'Execute "crm" command.');
+    ok((grep /resource/, @calls), 'Add "resource" subcommand.');
+    ok((grep /locate/, @calls), 'Include "locate" argument.');
+    ok((grep /rsc_sap_QES_ASCS01/, @calls), 'Specify resource name.');
+};
+
+subtest '[crm_resource_locate] Verify cmd' => sub {
+    my $hacluster = Test::MockModule->new('hacluster', no_auto => 1);
+    $hacluster->redefine(script_output => sub { return 'resource rsc_sap_QES_ASCS01 is running on: qesscs01lc14'; });
+    is crm_resource_locate(crm_resource => 'rsc_sap_QES_ASCS01'), 'qesscs01lc14', 'Return correct hostname';
 };
 
 done_testing;

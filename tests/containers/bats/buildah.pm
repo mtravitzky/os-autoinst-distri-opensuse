@@ -10,11 +10,8 @@
 use Mojo::Base 'containers::basetest';
 use testapi;
 use serial_terminal qw(select_serial_terminal);
-use utils qw(script_retry);
-use containers::common;
 use containers::bats;
 
-my $test_dir = "/var/tmp/buildah-tests";
 
 sub run_tests {
     my %params = @_;
@@ -38,9 +35,9 @@ sub run_tests {
 
     my $ret = bats_tests($log_file, \%env, $skip_tests);
 
-    script_run 'podman rm -vf $(podman ps -aq --external)';
-    assert_script_run "podman system reset -f";
-    assert_script_run "buildah prune -a -f";
+    run_command 'podman rm -vf $(podman ps -aq --external) || true';
+    run_command "podman system reset -f";
+    run_command "buildah prune -a -f";
 
     return ($ret);
 }
@@ -49,7 +46,7 @@ sub run {
     my ($self) = @_;
     select_serial_terminal;
 
-    my @pkgs = qw(buildah docker git-core git-daemon glibc-devel-static go jq libgpgme-devel libseccomp-devel make openssl podman selinux-tools);
+    my @pkgs = qw(buildah docker git-core git-daemon glibc-devel-static go1.24 jq libgpgme-devel libseccomp-devel make openssl podman selinux-tools);
 
     $self->bats_setup(@pkgs);
 
@@ -63,24 +60,19 @@ sub run {
 
     # Download buildah sources
     my $buildah_version = script_output "buildah --version | awk '{ print \$3 }'";
-    my $url = get_var("BATS_URL", "https://github.com/containers/buildah/archive/refs/tags/v$buildah_version.tar.gz");
-    assert_script_run "mkdir -p $test_dir";
-    selinux_hack $test_dir;
-    selinux_hack "/tmp";
-    assert_script_run "cd $test_dir";
-    script_retry("curl -sL $url | tar -zxf - --strip-components 1", retry => 5, delay => 60, timeout => 300);
+    bats_sources $buildah_version;
+    bats_patches;
 
     # Patch mkdir to always use -p
-    assert_script_run "sed -i 's/ mkdir /& -p /' tests/*.bats tests/helpers.bash";
+    run_command "sed -i 's/ mkdir /& -p /' tests/*.bats tests/helpers.bash";
 
     # Compile helpers used by the tests
     my $helpers = script_output 'echo $(grep ^all: Makefile | grep -o "bin/[a-z]*" | grep -v bin/buildah)';
-    assert_script_run "make $helpers", timeout => 600;
+    run_command "make $helpers", timeout => 600;
 
     my $errors = run_tests(rootless => 1, skip_tests => get_var('BATS_SKIP_USER', ''));
 
-    select_serial_terminal;
-    assert_script_run "cd $test_dir";
+    switch_to_root;
 
     $errors += run_tests(rootless => 0, skip_tests => get_var('BATS_SKIP_ROOT', ''));
 
@@ -88,11 +80,11 @@ sub run {
 }
 
 sub post_fail_hook {
-    bats_post_hook $test_dir;
+    bats_post_hook;
 }
 
 sub post_run_hook {
-    bats_post_hook $test_dir;
+    bats_post_hook;
 }
 
 1;

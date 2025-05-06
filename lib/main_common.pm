@@ -1154,7 +1154,7 @@ sub load_console_server_tests {
     # TODO test on openSUSE https://progress.opensuse.org/issues/31972
     loadtest "console/apache_ssl" if is_sle;
     # TODO test on openSUSE https://progress.opensuse.org/issues/31972
-    loadtest "console/apache_nss" if is_sle;
+    loadtest "console/apache_nss" if is_sle("<16");
 }
 
 sub load_consoletests {
@@ -1272,8 +1272,7 @@ sub load_consoletests {
     loadtest "console/vim" if is_opensuse || is_sle('<15') || !get_var('PATTERNS') || check_var_array('PATTERNS', 'enhanced_base');
     # textmode install comes without firewall by default atm on openSUSE.
     # For virtualization server xen and kvm is disabled by default: https://fate.suse.com/324207
-    # Cloud and VMware images come without firewalld by default
-    if ((is_sle || !check_var("DESKTOP", "textmode")) && !is_krypton_argon && !is_virtualization_server && !is_vmware && get_var('FLAVOR', '') !~ /JeOS-for-OpenStack-Cloud.*/ && get_var('FLAVOR', '') !~ /Minimal-VM-Cloud/) {
+    if ((is_sle || !check_var("DESKTOP", "textmode")) && !is_krypton_argon && !is_virtualization_server && !is_vmware) {
         loadtest "console/firewall_enabled";
     }
     if (is_jeos) {
@@ -2142,6 +2141,12 @@ sub load_x11_remote {
         loadtest 'x11/remote_desktop/windows_network_setup';
         loadtest 'x11/remote_desktop/windows_server_setup';
     }
+    elsif (check_var('REMOTE_DESKTOP_TYPE', 'x11_server')) {
+        loadtest 'microos/workloads/x11-container/x11_server';
+    }
+    elsif (check_var('REMOTE_DESKTOP_TYPE', 'x11_client')) {
+        loadtest 'microos/workloads/x11-container/x11_client';
+    }
 }
 
 
@@ -2175,6 +2180,8 @@ sub load_common_x11 {
     elsif (check_var('REGRESSION', 'remote')) {
         if (check_var("REMOTE_DESKTOP_TYPE", "win_client") || check_var('REMOTE_DESKTOP_TYPE', "win_server")) {
             loadtest "x11/remote_desktop/windows_client_boot";
+        } elsif (check_var("REMOTE_DESKTOP_TYPE", "x11_server")) {
+            loadtest 'microos/disk_boot';
         }
         else {
             loadtest 'boot/boot_to_desktop';
